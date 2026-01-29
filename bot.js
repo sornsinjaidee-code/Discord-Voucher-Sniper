@@ -1,27 +1,25 @@
 const { Client } = require('discord.js-selfbot-v13');
 const cloudscraper = require('cloudscraper');
+const axios = require('axios');
 const Jimp = require('jimp');
 const jsQR = require('jsqr');
-const axios = require('axios');
 require('dotenv').config();
 
 let client = null;
 let stats = { success: 0, fail: 0, amount: 0 };
 const seenVouchers = new Set();
 
-async function sendWebhook(amount, voucher, speed) {
-    const webhook = process.env.WEBHOOK;
-    if (!webhook) return;
+async function sendToWebhook(amount, code, speed) {
+    if (!process.env.WEBHOOK) return;
     try {
-        await axios.post(webhook, {
+        await axios.post(process.env.WEBHOOK, {
             embeds: [{
                 title: "✅ รับซอง TrueMoney สำเร็จ",
-                color: 3066993, // สีเขียวกรอบตามที่ขอ
+                color: 3066993,
                 fields: [
                     { name: "💵 จำนวนเงิน", value: `**${amount.toFixed(2)}** บาท`, inline: true },
-                    { name: "💰 ยอดรวม", value: `**${stats.amount.toFixed(2)}** บาท`, inline: true },
-                    { name: "⚡ ความเร็ว", value: `**${speed}**ms`, inline: false },
-                    { name: "🔗 โค้ด", value: `\`${voucher}\`` }
+                    { name: "💰 ยอดสะสม", value: `**${stats.amount.toFixed(2)}** บาท`, inline: true },
+                    { name: "⚡ ความเร็ว", value: `**${speed}**ms`, inline: false }
                 ],
                 timestamp: new Date()
             }]
@@ -33,64 +31,63 @@ async function shootVoucher(code) {
     if (seenVouchers.has(code)) return;
     seenVouchers.add(code);
     const start = Date.now();
-    
+
     try {
-        const response = await cloudscraper.post(`https://gift.truemoney.com/campaign/vouchers/${code}/redeem`, {
+        const res = await cloudscraper.post(`https://gift.truemoney.com/campaign/vouchers/${code}/redeem`, {
             json: { mobile: process.env.PHONE, voucher_hash: code },
             headers: { 'Referer': `https://gift.truemoney.com/campaign/?v=${code}` }
         });
 
-        const elapsed = Date.now() - start;
-        if (response && response.status && response.status.code === 'SUCCESS') {
-            const amt = parseFloat(response.data.my_ticket.amount_baht);
+        const speed = Date.now() - start;
+        if (res?.status?.code === 'SUCCESS') {
+            const amt = parseFloat(res.data.my_ticket.amount_baht);
             stats.success++;
             stats.amount += amt;
-            console.log(`💰 [${elapsed}ms] +${amt}฿`);
-            await sendWebhook(amt, code, elapsed);
+            console.log(`💰 [${speed}ms] +${amt}฿ | ${code}`);
+            await sendToWebhook(amt, code, speed);
         } else {
             stats.fail++;
+            console.log(`⚠️ [${speed}ms] ${res?.status?.code || 'ERROR'} | ${code}`);
         }
-    } catch (err) {
-        stats.fail++;
-    }
-}
-
-function extractCodes(text) {
-    const pattern = /v=([a-zA-Z0-9]{10,})/gi;
-    return [...text.matchAll(pattern)].map(m => m[1]);
+    } catch (e) { stats.fail++; }
 }
 
 function startBot() {
     if (client) return;
     client = new Client({ checkUpdate: false });
-    
+
     client.on('ready', () => console.log(`Logged in as ${client.user.tag}`));
-    
+
     client.on('messageCreate', async (msg) => {
-        if (msg.author.id === client.user.id) return;
-        
-        // 1. Text
-        const codes = extractCodes(msg.content || "");
+        // ดักทุกลิงก์ซอง ไม่ว่าใครจะส่ง
+        const codes = [...msg.content.matchAll(/v=([A-Za-z0-9]{10,})/gi)].map(m => m[1]);
         codes.forEach(c => shootVoucher(c));
-        
-        // 2. Attachments (QR)
+
+        // ดักจากรูปภาพ (QR Code)
         for (const attachment of msg.attachments.values()) {
             if (attachment.contentType?.startsWith('image/')) {
                 try {
-                    const res = await axios.get(attachment.url, { responseType: 'arraybuffer' });
-                    const image = await Jimp.read(Buffer.from(res.data));
+                    const response = await axios.get(attachment.url, { responseType: 'arraybuffer' });
+                    const image = await Jimp.read(Buffer.from(response.data));
                     const qr = jsQR(new Uint8ClampedArray(image.bitmap.data), image.bitmap.width, image.bitmap.height);
-                    if (qr) extractCodes(qr.data).forEach(c => shootVoucher(c));
+                    if (qr) {
+                        const qrCodes = [...qr.data.matchAll(/v=([A-Za-z0-9]{10,})/gi)].map(m => m[1]);
+                        qrCodes.forEach(c => shootVoucher(c));
+                    }
                 } catch (e) {}
             }
         }
     });
 
-    client.login(process.env.TOKEN).catch(e => console.error("Login Error"));
+    client.login(process.env.TOKEN).catch(() => {
+        console.error("TOKEN INVALID");
+        if (fs.existsSync('.env')) fs.unlinkSync('.env');
+    });
 }
 
-function stopBot() {
-    if (client) { client.destroy(); client = null; }
-}
-
-module.exports = { startBot, stopBot, getStats: () => stats };
+module.exports = { 
+    startBot, 
+    stopBot: () => { client?.destroy(); client = null; },
+    getStats: () => stats,
+    getDiscordUser: () => client?.user?.tag || "CONNECTING..."
+};
